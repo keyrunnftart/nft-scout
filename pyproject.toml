@@ -1,0 +1,19 @@
+[project]
+name = "nft-scout"
+version = "0.1.0"
+description = "keybot's primary-drop scout: artists whose mints resell >=20% above mint within 14 days"
+authors = [{ name = "keyrunnftart", email = "keyrunnftart@gmail.com" }]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "mcp[cli]>=2.2.0",
+    "python-dotenv>=1.2.3",
+    "truststore>=0.10.4",
+]
+
+[project.scripts]
+nft-scout = "nft_scout:main"
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"

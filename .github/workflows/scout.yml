@@ -1,0 +1,45 @@
+name: scout
+# every 30 min: live mints from the top artists -> ntfy ping; full artist rescan once a day (rescan_hours)
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      rescan:
+        description: 'force a full artist rescan now'
+        type: boolean
+        default: false
+
+concurrency:
+  group: scout
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      # data/ (scan, sent pings, api cache) carries over between runs via the actions cache
+      - uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: scout-data-${{ github.run_id }}
+          restore-keys: scout-data-
+      - run: uv run --frozen python -m nft_scout watch
+        env:
+          OPENSEA_API_KEY: ${{ secrets.OPENSEA_API_KEY }}
+          ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+          BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          SCOUT_STATE: ${{ secrets.SCOUT_STATE }}
+          ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
+          SCOUT_FORCE_RESCAN: ${{ inputs.rescan && '1' || '' }}
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: data
+          key: scout-data-${{ github.run_id }}
