@@ -210,9 +210,13 @@ def live_drops(scan: dict | None = None, only_top: int = 5, cfg: dict | None = N
                 tok = m["nft"]["identifier"] if m["nft"].get("token_standard") == "erc1155" else None
                 by_tok[tok].append(m)
             for tok, ms in by_tok.items():
-                cost = analyze._mint_cost(info, ms, samples=3)
+                cost = analyze._mint_cost(info, ms, samples=8)
                 if not cost or "value" not in cost:   # airdrop/claim-only mints have no price
                     continue
+                if cost.get("paid_all_in") and cost["free_share"] > 0:
+                    # some mints are free holder/allowlist claims; a new minter pays the public price
+                    gas = cost["gas"]
+                    cost = {**cost, "all_in": cost["paid_all_in"], "value": cost["paid_all_in"] - gas}
                 offer = opensea.best_collection_offer(slug)
                 sell = chain.sell_cost_eth(info["chain"])
                 offer_net = offer * (1 - info["required_fee"]) - sell if offer else None
@@ -227,6 +231,7 @@ def live_drops(scan: dict | None = None, only_top: int = 5, cfg: dict | None = N
                     "target_exit": round(cfg["min_premium"] * cost["all_in"] / (1 - info["required_fee"])
                                          + sell, 6),
                     "fits_budget": cost["all_in"] <= cap, "budget_cap": cap,
+                    "floor_now": (_floor(slug) or (None,))[0] or None,
                     "opensea_url": info["opensea_url"] + (f"/overview?token={tok}" if tok else ""),
                     "project_url": info["project_url"],
                 })
@@ -238,6 +243,9 @@ def live_drops(scan: dict | None = None, only_top: int = 5, cfg: dict | None = N
             out.append({"artist": next(a["name"] for a in top if a["owner"] == info["owner"]), "upcoming": True,
                         "slug": info["slug"], "name": info["name"], "chain": info["chain"],
                         "next_stage": dr.get("next_stage"), "opensea_url": dr["opensea_url"]})
+    for o in out:
+        # a floor already under the 1.2x exit means minting is buying above what the market pays: no ping
+        o["worth_it"] = not o.get("upcoming") and (not o.get("floor_now") or o["floor_now"] >= o["target_exit"])
     out.sort(key=lambda o: (not o.get("fits_budget", False), -(o.get("artist_score") or 0)))
     return out
 
@@ -246,7 +254,7 @@ def notify_live(top_n: int = 5, cfg: dict | None = None) -> list[dict]:
     """Ping the phone for each budget-fitting live mint from the top artists (deduped per drop)."""
     sent = []
     for o in live_drops(only_top=top_n, cfg=cfg):
-        if o.get("upcoming") or not o.get("fits_budget"):
+        if o.get("upcoming") or not o.get("fits_budget") or not o.get("worth_it"):
             continue
         title, text = notify.opportunity_text(o)
         r = notify.ping(title, text, click=o["project_url"] or o["opensea_url"],

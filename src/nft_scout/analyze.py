@@ -91,9 +91,13 @@ def _mint_cost(info: dict, mints: list[dict], samples: int = 8) -> dict | None:
     costs = [c for c in raw if not c.get("airdrop")]
     if not costs:
         return {"airdrop_only": True} if raw else None
+    paid = [c for c in costs if c["value"] > 0]
     return {"value": _med([c["value"] for c in costs]), "gas": _med([c["gas"] for c in costs]),
             "all_in": _med([c["value"] + c["gas"] for c in costs]), "sampled": len(costs),
-            "airdrops_skipped": len(raw) - len(costs)}
+            "airdrops_skipped": len(raw) - len(costs),
+            # free claims mixed with a paid public mint: what a new minter actually pays
+            "paid_all_in": _med([c["value"] + c["gas"] for c in paid]) if paid else None,
+            "free_share": round(1 - len(paid) / len(costs), 2)}
 
 
 def _mint_start(slug: str, mints: list[dict], created_ts: int, nth: int = 10) -> int:
