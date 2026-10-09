@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 import httpx
 
@@ -19,7 +20,12 @@ def ping(title: str, text: str, click: str | None = None, urgent: bool = False, 
     h = {"Title": title.encode("utf-8"), "Priority": "urgent" if urgent else "high", "Tags": tags}
     if click:
         h["Click"] = click
-    r = httpx.post(f"https://ntfy.sh/{topic}", content=text.encode("utf-8"), headers=h, timeout=15)
+    # ntfy.sh rate-limits per IP and GitHub runners share IPs: back off on 429/5xx instead of dropping the ping
+    for attempt in range(4):
+        r = httpx.post(f"https://ntfy.sh/{topic}", content=text.encode("utf-8"), headers=h, timeout=15)
+        if r.status_code != 429 and r.status_code < 500:
+            break
+        time.sleep(min(float(r.headers.get("Retry-After") or 0) or 5 * 2 ** attempt, 40))
     r.raise_for_status()
     if dedupe_key:
         store.mark_sent(dedupe_key)

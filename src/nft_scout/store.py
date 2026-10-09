@@ -93,6 +93,7 @@ DEFAULT_CONFIG = {
     "my_tezos": "",
     # contracts not created by my_wallet on OpenSea; mute_mints when another watcher already pings their mints
     "my_contracts": [],
+    "min_offer_eth": 0.001,      # ignore item offers below this (bot lowballs)
 }
 
 

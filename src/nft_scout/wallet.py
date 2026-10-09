@@ -1,7 +1,7 @@
-"""Wallet watch: phone pings when the user's own work sells (primary or secondary) or an auction starts.
+"""Wallet watch: phone pings when the user's own work sells (primary or secondary), gets a bid or an auction starts.
 
 Sources, each with its own cursor in data/wallet_state.json (the first run only sets cursors, no replays):
-- OpenSea: sales (+ primary mints, + auction listings) on collections the wallet created or that are listed in
+- OpenSea: sales (+ primary mints, item offers, auction listings) on collections the wallet created or that are listed in
   config `my_contracts`, plus account-level sales where the wallet is the seller (1/1s on shared contracts).
 - OpenSea account feed: NFTs leaving the wallet on any chain, which catches sales and auction settlements on
   venues OpenSea doesn't trade (SuperRare, Foundation, KnownOrigin, Manifold ...).
@@ -18,11 +18,19 @@ from .analyze import coll_info, log, parallel
 
 OBJKT = "https://data.objkt.com/v3/graphql"
 TZ_SALE = ("buy", "accept", "settle")          # list_buy, offer_accept, english_auction_settle, dutch_auction_buy ...
-TZ_AUCTION = ("auction_create", "auction_bid")
+TZ_AUCTION = ("auction_create", "auction_bid", "offer_create")
 
 
 def _short(a: str | None) -> str:
     return f"{a[:6]}…{a[-4:]}" if a else "?"
+
+
+def _amount(ev: dict) -> float:
+    p = ev.get("payment") or {}
+    try:
+        return int(p["quantity"]) / 10 ** int(p.get("decimals", 18))
+    except (KeyError, ValueError, TypeError):
+        return 0.0
 
 
 def _eth(ev: dict) -> str:
@@ -63,16 +71,17 @@ def _my_tokens(wallet: str) -> set[tuple[str, str]]:
         return set()
 
 
-def _os_pings(cfg: dict, wallet: str, since: int) -> list[tuple[str, str, str, str]]:
-    """(dedupe key, title, text, click) for OpenSea events after `since`."""
+def _os_pings(cfg: dict, wallet: str, since: int) -> tuple[list[tuple[str, str, str, str]], bool]:
+    """(dedupe key, title, text, click) for OpenSea events after `since`, and whether every feed was read."""
     out = []
+    complete = True
     mine: set[tuple[str, str]] | None = None
     slugs = _my_slugs(cfg, wallet)
 
     def fetch(slug: str) -> list[tuple[str, dict]] | None:
         # one call per collection; mints come back as event_type "transfer" with transfer_type "mint"
         try:
-            evs = opensea.events(slug, ["sale", "mint", "listing"], after=since, max_pages=5, ttl=0)
+            evs = opensea.events(slug, ["sale", "mint", "listing", "offer"], after=since, max_pages=5, ttl=0)
         except RuntimeError as e:
             log(f"wallet skip {slug}: {e}")
             return None
@@ -84,10 +93,13 @@ def _os_pings(cfg: dict, wallet: str, since: int) -> list[tuple[str, str, str, s
                 out.append(("mint", e))
             elif e["event_type"] == "order" and "auction" in (e.get("order_type") or "").lower():
                 out.append(("auction", e))
+            elif e["event_type"] == "order" and e.get("order_type") == "item_offer":
+                out.append(("offer", e))
         return out
 
     for slug, evs in zip(slugs, parallel(fetch, list(slugs), 6)):
         if evs is None:
+            complete = False                 # rate-limited: re-read this window next tick
             continue
         info = coll_info(slug) or {}
         own_contract = info.get("owner") == wallet or slugs[slug]["mute_mints"]   # my_contracts count as own
@@ -110,6 +122,11 @@ def _os_pings(cfg: dict, wallet: str, since: int) -> list[tuple[str, str, str, s
             elif kind == "mint":
                 out.append((f"os:{tx}:{nft.get('identifier')}", f"minted: {name}",
                             f"primary mint · {e.get('chain')}\nto {_short(e.get('to_address'))}", url))
+            elif kind == "offer":
+                if _amount(e) < cfg.get("min_offer_eth", 0):
+                    continue                     # bot lowballs
+                out.append((f"os:{tx}", f"new bid: {name}",
+                            f"offer {_eth(e)} · {e.get('chain')}\nfrom {_short(e.get('maker'))}", url))
             else:
                 out.append((f"os:{tx}", f"auction: {name}", f"auction listed · {_eth(e)} · {e.get('chain')}", url))
     # account feed (every chain OpenSea indexes): sales where the wallet is the seller, then any NFT leaving
@@ -120,6 +137,7 @@ def _os_pings(cfg: dict, wallet: str, since: int) -> list[tuple[str, str, str, s
                                       {"event_type": et, "after": since}, max_pages=3, ttl=0))
         except RuntimeError as e:
             log(f"wallet account feed: {e}")
+            complete = False
             continue
         for e in acct:
             nft = e.get("nft") or {}
@@ -134,7 +152,7 @@ def _os_pings(cfg: dict, wallet: str, since: int) -> list[tuple[str, str, str, s
                 out.append((key, f"left wallet: {name}",
                             f"{e.get('chain')} → {_short(e.get('to_address'))}\nsale, auction settle or transfer",
                             _explorer(e.get("chain"), e.get("transaction")) if e.get("transaction") else url))
-    return out
+    return out, complete
 
 
 def _explorer(ch: str, tx: str) -> str:
@@ -172,7 +190,7 @@ def _tz_pings(tz: str, cursor: int | None) -> tuple[list[tuple[str, str, str, st
             out.append((f"tz:{e['id']}", f"{'sold' if primary else 'resold'}: {name}",
                         f"{'primary' if primary else 'secondary'} · {price} × {e.get('amount') or 1} · tezos ({kind})", url))
         elif any(k in kind for k in TZ_AUCTION):
-            what = "auction started" if "create" in kind else "new bid"
+            what = "auction started" if "auction_create" in kind else "new bid"
             out.append((f"tz:{e['id']}", f"{what}: {name}", f"{price} · tezos ({kind})", url))
     return out, cursor
 
@@ -184,13 +202,17 @@ def check(cfg: dict | None = None) -> list[dict]:
     wallet = (cfg.get("my_wallet") or "").lower()
     tz = cfg.get("my_tezos")
     st = store.wallet_state()
+    prev = dict(st)
     now = int(time.time())
     pings: list[tuple[str, str, str, str]] = []
     if wallet:
         since = st.get("os_since")
+        complete = True
         if since:
-            pings += _os_pings(cfg, wallet, since - 120)   # small overlap; dedupe keys stop repeats
-        st["os_since"] = now
+            osp, complete = _os_pings(cfg, wallet, since - 120)   # small overlap; dedupe keys stop repeats
+            pings += osp
+        if complete or now - (since or 0) > 86400:   # a feed that stays down for a day stops holding the cursor
+            st["os_since"] = now
     if tz:
         try:
             tzp, st["tz_cursor"] = _tz_pings(tz, st.get("tz_cursor"))
@@ -206,5 +228,7 @@ def check(cfg: dict | None = None) -> list[dict]:
             sent.append({"ping": title, **notify.ping(title, text, click=click, tags="art", dedupe_key=key)})
         except httpx.HTTPError as e:
             sent.append({"ping": title, "sent": False, "why": str(e)})
+    if any(not x.get("sent") and x.get("why") != "already pinged" for x in sent):
+        st = prev                        # keep the old cursors so the next tick retries; dedupe keys skip the sent ones
     store.save_wallet_state(st)
     return sent

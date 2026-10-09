@@ -7,6 +7,8 @@ import os
 import time
 from collections import defaultdict
 
+import httpx
+
 from . import analyze, chain, follow, notify, opensea, store, wallet
 from .analyze import DAY, log
 
@@ -257,8 +259,11 @@ def notify_live(top_n: int = 5, cfg: dict | None = None) -> list[dict]:
         if o.get("upcoming") or not o.get("fits_budget") or not o.get("worth_it"):
             continue
         title, text = notify.opportunity_text(o)
-        r = notify.ping(title, text, click=o["project_url"] or o["opensea_url"],
-                        dedupe_key=f"{o['slug']}:{o.get('token')}")
+        try:
+            r = notify.ping(title, text, click=o["project_url"] or o["opensea_url"],
+                            dedupe_key=f"{o['slug']}:{o.get('token')}")
+        except httpx.HTTPError as e:     # one failed ping must not end the tick before the wallet check
+            r = {"sent": False, "why": str(e)}
         sent.append({"drop": title, **r})
     return sent
 
@@ -266,14 +271,15 @@ def notify_live(top_n: int = 5, cfg: dict | None = None) -> list[dict]:
 def watch(top_n: int = 5) -> dict:
     """One unattended tick: full rescan only when the last one is older than rescan_hours, then live check + pings."""
     cfg = store.config()
+    # own sales/bids first: they're time-sensitive, and the daily rescan takes ~40 min
+    mine = wallet.check(cfg)
+    mine += follow.check(cfg)
     last = store.last_scan()
     rescanned = (not last or time.time() - last["at"] > cfg["rescan_hours"] * 3600
                  or bool(os.environ.get("SCOUT_FORCE_RESCAN")))
     if rescanned:
         run_scan(cfg=cfg)
     sent = notify_live(top_n, cfg)
-    mine = wallet.check(cfg)
-    mine += follow.check(cfg)
     store.prune_cache()
     log(f"watch: rescanned={rescanned} pings={sum(x.get('sent', False) for x in sent)} "
         f"wallet={sum(x.get('sent', False) for x in mine)}", public=True)
