@@ -164,6 +164,17 @@ def _explorer(ch: str, tx: str) -> str:
 
 # ---- Tezos via objkt ------------------------------------------------------------------------------------
 
+def _objkt(q: str, variables: dict) -> dict | None:
+    """objkt GraphQL; None when it answers with a non-JSON page (403/5xx/rate limit) so the tick goes on."""
+    try:
+        r = httpx.post(OBJKT, json={"query": q, "variables": variables}, timeout=30,
+                       headers={"User-Agent": "nft-scout/1.0 (+github.com/keyrunnftart/nft-scout)"})
+        return r.json()
+    except (httpx.HTTPError, ValueError) as e:
+        print(f"objkt unavailable ({type(e).__name__}); tezos pings retry next tick")
+        return None
+
+
 def _tz_pings(tz: str, cursor: int | None) -> tuple[list[tuple[str, str, str, str]], int | None]:
     q = """query($a:String!,$c:bigint!){ event(where:{token:{creators:{creator_address:{_eq:$a}}},
       marketplace_event_type:{_is_null:false}, id:{_gt:$c}}, order_by:{id:asc}, limit:200){
@@ -172,9 +183,13 @@ def _tz_pings(tz: str, cursor: int | None) -> tuple[list[tuple[str, str, str, st
     if cursor is None:   # first run: start at the newest event
         q0 = """query($a:String!){ event(where:{token:{creators:{creator_address:{_eq:$a}}}},
           order_by:{id:desc}, limit:1){ id } }"""
-        r = httpx.post(OBJKT, json={"query": q0, "variables": {"a": tz}}, timeout=30).json()
+        r = _objkt(q0, {"a": tz})
+        if r is None:
+            return [], None
         return [], (r.get("data", {}).get("event") or [{"id": 0}])[0]["id"]
-    r = httpx.post(OBJKT, json={"query": q, "variables": {"a": tz, "c": cursor}}, timeout=30).json()
+    r = _objkt(q, {"a": tz, "c": cursor})
+    if r is None:                     # keep the cursor: nothing is skipped, it is picked up next tick
+        return [], cursor
     if "errors" in r:
         raise RuntimeError(f"objkt: {r['errors']}")
     out = []
