@@ -94,6 +94,7 @@ DEFAULT_CONFIG = {
     # contracts not created by my_wallet on OpenSea; mute_mints when another watcher already pings their mints
     "my_contracts": [],
     "min_offer_eth": 0.001,      # ignore item offers below this (bot lowballs)
+    "watch_6529_drops": [],      # 6529 Main Stage drop ids: ping on new voters / vote changes
 }
 
 

@@ -9,7 +9,7 @@ from collections import defaultdict
 
 import httpx
 
-from . import analyze, chain, follow, notify, opensea, store, wallet
+from . import analyze, chain, follow, notify, opensea, store, wallet, memes6529
 from .analyze import DAY, log
 
 
@@ -274,6 +274,7 @@ def watch(top_n: int = 5) -> dict:
     # own sales/bids first: they're time-sensitive, and the daily rescan takes ~40 min
     mine = wallet.check(cfg)
     mine += follow.check(cfg)
+    mine += memes6529.check(cfg)
     last = store.last_scan()
     rescanned = (not last or time.time() - last["at"] > cfg["rescan_hours"] * 3600
                  or bool(os.environ.get("SCOUT_FORCE_RESCAN")))
