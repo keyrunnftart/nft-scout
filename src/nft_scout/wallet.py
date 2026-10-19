@@ -19,6 +19,12 @@ from .analyze import coll_info, log, parallel
 OBJKT = "https://data.objkt.com/v3/graphql"
 TZ_SALE = ("buy", "accept", "settle")          # list_buy, offer_accept, english_auction_settle, dutch_auction_buy ...
 TZ_AUCTION = ("auction_create", "auction_bid", "offer_create")
+# marketplace escrow contracts: an NFT moving here is an auction starting, not a sale or a transfer away
+ESCROW = {
+    "0x6d7c44773c52d396f43c2d511b81aa168e9a7a42": (
+        "SuperRare", "SR auction live",
+        "first bid received on SuperRare · reserve met, 24h auction started\nNFT held in SuperRare escrow until it settles"),
+}
 
 
 def _short(a: str | None) -> str:
@@ -146,6 +152,13 @@ def _os_pings(cfg: dict, wallet: str, since: int) -> tuple[list[tuple[str, str, 
             url = nft.get("opensea_url") or "https://opensea.io"
             if et == "sale" and (e.get("seller") or "").lower() == wallet:
                 out.append((key, f"sold: {name}", f"you sold · {_eth(e)} · {e.get('chain')}\n→ {_short(e.get('buyer'))}", url))
+            elif (et == "transfer" and e.get("transfer_type") == "transfer"
+                  and (e.get("from_address") or "").lower() == wallet
+                  and (e.get("to_address") or "").lower() in ESCROW):
+                venue, title, body = ESCROW[(e.get("to_address") or "").lower()]
+                link = (f"https://superrare.com/artwork/eth/{nft.get('contract')}/{nft.get('identifier')}"
+                        if venue == "SuperRare" and nft.get("contract") else url)
+                out.append((key, f"{title}: {name}", body, link))
             elif (et == "transfer" and e.get("transfer_type") == "transfer"
                   and (e.get("from_address") or "").lower() == wallet
                   and (e.get("to_address") or "") != "0x" + "0" * 40):
