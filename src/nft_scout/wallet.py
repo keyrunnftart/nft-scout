@@ -5,6 +5,7 @@ Sources, each with its own cursor in data/wallet_state.json (the first run only 
   config `my_contracts`, plus account-level sales where the wallet is the seller (1/1s on shared contracts).
 - OpenSea account feed: NFTs leaving the wallet on any chain, which catches sales and auction settlements on
   venues OpenSea doesn't trade (SuperRare, Foundation, KnownOrigin, Manifold ...).
+- Ethereum RPC logs: bids on SuperRare (auctions + offers) and Transient auctions of the wallet's work.
 - Tezos: objkt events on tokens the tz address created (sales, offer accepts, auction create/bid/settle)."""
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import time
 
 import httpx
 
-from . import notify, opensea, store
+from . import chain, notify, opensea, store
 from .analyze import coll_info, log, parallel
 
 OBJKT = "https://data.objkt.com/v3/graphql"
@@ -24,7 +25,17 @@ ESCROW = {
     "0x6d7c44773c52d396f43c2d511b81aa168e9a7a42": (
         "SuperRare", "SR auction live",
         "first bid received on SuperRare · reserve met, 24h auction started\nNFT held in SuperRare escrow until it settles"),
+    "0x6f66b95a0c512f3497fb46660e0bc3b94b989f8d": (
+        "Transient", "Transient listing live",
+        "listed on Transient (auction / buy now)\nNFT held in the Transient auction house until it sells or is delisted"),
 }
+# on-chain auction houses OpenSea doesn't index: bids are read straight from their event logs every tick
+SR_BAZAAR = "0x6d7c44773c52d396f43c2d511b81aa168e9a7a42"
+TL_AUCTION = "0x6f66b95a0c512f3497fb46660e0bc3b94b989f8d"
+SR_BID = "0x189a468e632a450afd491f84aa9ae94addc6813c7e309a7b1b1223f88802a77d"     # AuctionBid(contract,bidder,id,currency,amount,...)
+SR_OFFER = "0xacbe96367816f728b84abf006ca777225b704072592132845e9a3dbd7b023691"   # OfferPlaced(contract,bidder,currency,amount,id,..)
+TL_BID = "0xec3d0c3ed87fd441707a880ed0b47c57cb0df7d321cc44199fb96a012bbbfd8d"     # AuctionBid(sender,nft,id,Listing)
+MAX_BACK = 800                     # free RPCs keep ~1000 blocks of logs; a tick that falls further behind skips ahead
 
 
 def _short(a: str | None) -> str:
@@ -175,6 +186,70 @@ def _explorer(ch: str, tx: str) -> str:
     return f"https://{base}/tx/{tx}"
 
 
+# ---- ETH auction houses via RPC logs (SuperRare, Transient) --------------------------------------------
+
+def _word(data: str, i: int) -> str:
+    return data[2 + 64 * i: 2 + 64 * (i + 1)]
+
+
+def _token_name(contract: str, tid: int) -> str:
+    try:
+        nft = opensea.get(f"chain/ethereum/contract/{contract}/nfts/{tid}", ttl=86400).get("nft") or {}
+        return nft.get("name") or f"{nft.get('collection') or _short(contract)} #{tid}"
+    except Exception:
+        return f"{_short(contract)} #{tid}"
+
+
+def _sr_owner_side(wallet: str, contract: str, tid: int, auction: bool) -> bool:
+    """Bid/offer is on the wallet's work: SR auction creator (auctions) or current owner (offers)."""
+    pad = contract[2:].rjust(64, "0") + hex(tid)[2:].rjust(64, "0")
+    try:
+        if auction:   # tokenAuctions(address,uint256) -> first word is auctionCreator
+            r = chain.call("ethereum", "eth_call", [{"to": SR_BAZAAR, "data": "0xc47c35c1" + pad}, "latest"])
+        else:         # ownerOf(uint256)
+            r = chain.call("ethereum", "eth_call", [{"to": contract, "data": "0x6352211e" + pad[64:]}, "latest"])
+        return ("0x" + str(r)[2:66][-40:]).lower() == wallet
+    except RuntimeError:
+        return False
+
+
+def _eth_auction_pings(wallet: str, cursor: int | None) -> tuple[list[tuple[str, str, str, str]], int | None]:
+    head = int(chain.call("ethereum", "eth_blockNumber", []), 16)
+    if cursor is None:               # first run: start at the head, no replays
+        return [], head
+    frm = max(cursor + 1, head - MAX_BACK)
+    if frm > head:
+        return [], cursor
+    span = {"fromBlock": hex(frm), "toBlock": hex(head)}
+    sr = chain.call("ethereum", "eth_getLogs", [{"address": SR_BAZAAR, "topics": [[SR_BID, SR_OFFER]], **span}]) or []
+    tl = chain.call("ethereum", "eth_getLogs", [{"address": TL_AUCTION, "topics": [TL_BID], **span}]) or []
+    out = []
+    for lg in sr:
+        t, d = lg["topics"], lg["data"]
+        contract, bidder = "0x" + t[1][-40:], "0x" + t[2][-40:]
+        if t[0] == SR_BID:
+            tid, amount, auction = int(t[3], 16), int(_word(d, 1), 16), True
+        else:
+            tid, amount, auction = int(_word(d, 1), 16), int(_word(d, 0), 16), False
+        if not _sr_owner_side(wallet, contract, tid, auction):
+            continue
+        name = _token_name(contract, tid)
+        out.append((f"eth:{lg['transactionHash']}:{lg['logIndex']}", f"new bid: {name}",
+                    f"{amount / 1e18:g} ETH · SuperRare {'auction' if auction else 'offer'}\nfrom {_short(bidder)}",
+                    f"https://superrare.com/artwork/eth/{contract}/{tid}"))
+    for lg in tl:
+        t, d = lg["topics"], lg["data"]
+        if ("0x" + _word(d, 2)[-40:]).lower() != wallet:     # Listing.seller
+            continue
+        contract, tid = "0x" + t[2][-40:], int(t[3], 16)
+        bid, bidder = int(_word(d, 12), 16), "0x" + _word(d, 11)[-40:]
+        name = _token_name(contract, tid)
+        out.append((f"eth:{lg['transactionHash']}:{lg['logIndex']}", f"new bid: {name}",
+                    f"{bid / 1e18:g} ETH · Transient auction\nfrom {_short(bidder)}",
+                    f"https://www.transient.xyz/nfts/ethereum/{contract}/{tid}"))
+    return out, head
+
+
 # ---- Tezos via objkt ------------------------------------------------------------------------------------
 
 def _objkt(q: str, variables: dict) -> dict | None:
@@ -241,6 +316,11 @@ def check(cfg: dict | None = None) -> list[dict]:
             pings += osp
         if complete or now - (since or 0) > 86400:   # a feed that stays down for a day stops holding the cursor
             st["os_since"] = now
+        try:
+            ethp, st["eth_block"] = _eth_auction_pings(wallet, st.get("eth_block"))
+            pings += ethp
+        except (RuntimeError, httpx.HTTPError, ValueError) as e:
+            log(f"wallet eth auctions: {e}")     # cursor kept: the next tick re-reads (up to MAX_BACK blocks)
     if tz:
         try:
             tzp, st["tz_cursor"] = _tz_pings(tz, st.get("tz_cursor"))
