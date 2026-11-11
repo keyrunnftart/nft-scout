@@ -1,6 +1,6 @@
 """Follow mode: one phone ping per new piece/drop minted by artists in config `follow_artists`, flip score or not
-(to collect early). First run only sets the cursor. Dedupe: per token for 1155 editions and small 1/1 contracts,
-per collection per day for bigger 721 drops, so an open edition pings once, not on every mint."""
+(to collect early). First run only sets the cursor. Dedupe: ONE ping per collection, ever (user, 13 Nov 2026: a single
+HectorOZ drop sent ~200 pings when it was keyed per token)."""
 
 from __future__ import annotations
 
@@ -25,10 +25,12 @@ def _artist_slugs(name: str) -> tuple[str, list[str], str]:
 
 
 def _key(info: dict, e: dict) -> str:
-    nft = e.get("nft") or {}
-    if nft.get("token_standard") == "erc1155" or (info.get("supply") or 0) <= 50:
-        return f"follow:{info['slug']}:{nft.get('identifier')}"
-    return f"follow:{info['slug']}:{time.strftime('%Y-%m-%d', time.gmtime(e['event_timestamp']))}"
+    return f"follow:{info['slug']}"
+
+
+def _pinged(prefix: str) -> bool:
+    """Already pinged for this collection, under the new key or any older per-token / per-day key."""
+    return any(k == prefix or k.startswith(prefix + ":") for k in store.sent())
 
 
 def check(cfg: dict | None = None) -> list[dict]:
@@ -60,6 +62,8 @@ def check(cfg: dict | None = None) -> list[dict]:
             for e in evs:
                 groups.setdefault(_key(info, e), []).append(e)
             for k, es in groups.items():
+                if _pinged(k):
+                    continue
                 nft = es[0].get("nft") or {}
                 # price from collectors' mints; the artist's own first mint is free and says nothing
                 buys = [e for e in es if (e.get("to_address") or "").lower() != wallet][:3]
@@ -71,7 +75,7 @@ def check(cfg: dict | None = None) -> list[dict]:
                     what = f"{price} · {len(es)} mints since last check"
                 else:
                     what = "minted by the artist (new 1/1 or reserve; watch for a listing/auction)"
-                pings[k] = (f"new from {who}: {nft.get('name') or info['name']}",
+                pings[k] = (f"new from {who}: {info['name'] or nft.get('name')}",
                             f"{info['name']} · {info['chain']}\n{what}", nft.get("opensea_url") or info.get("opensea_url"))
     sent = []
     for k, (title, text, url) in pings.items():

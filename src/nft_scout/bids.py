@@ -195,7 +195,15 @@ def learn(ch: str, wallet: str, mine: dict) -> None:
                                     if LISTING.search(m := methods.get(t["input"][:10], "")) and not NOT_LISTING.search(m)]
     if txs:
         mine["learned"] = max(int(t["blockNumber"]) for t in txs)
-    mine["nonce"] = nonce
+    # the explorer lags the chain: a listing sent seconds ago may not be in txlist yet. Commit the nonce only once the
+    # wallet's newest tx (nonce - 1) has been seen, otherwise learn again next tick (Crossings, 10 Nov 2026: the listing
+    # tx was missed this way, so its bid never pinged)
+    own = [int(t["nonce"]) for t in txs if t["from"].lower() == wallet and str(t.get("nonce", "")).isdigit()]
+    mine["seen_nonce"] = max([mine.get("seen_nonce", -1)] + own)
+    if mine["seen_nonce"] >= nonce - 1:
+        mine["nonce"] = nonce
+    else:
+        log(f"bids learn {ch}: explorer behind (seen nonce {mine['seen_nonce']} < {nonce - 1}); retry next tick")
     for h in dict.fromkeys(todo):
         try:
             _learn_tx(ch, wallet, h, mine)

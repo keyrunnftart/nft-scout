@@ -258,10 +258,12 @@ def notify_live(top_n: int = 5, cfg: dict | None = None) -> list[dict]:
     for o in live_drops(only_top=top_n, cfg=cfg):
         if o.get("upcoming") or not o.get("fits_budget") or not o.get("worth_it"):
             continue
+        if any(k == f"live:{o['slug']}" or k.startswith(f"{o['slug']}:") for k in store.sent()):
+            continue                     # this collection was already pinged (also under the old per-token keys)
         title, text = notify.opportunity_text(o)
         try:
             r = notify.ping(title, text, click=o["project_url"] or o["opensea_url"],
-                            dedupe_key=f"{o['slug']}:{o.get('token')}")
+                            dedupe_key=f"live:{o['slug']}")   # one ping per collection, not per token (HectorOZ, 13 Nov 2026)
         except httpx.HTTPError as e:     # one failed ping must not end the tick before the wallet check
             r = {"sent": False, "why": str(e)}
         sent.append({"drop": title, **r})
