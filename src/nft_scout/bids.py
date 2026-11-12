@@ -290,16 +290,26 @@ def watch(ch: str, wallet: str, mine: dict) -> list[tuple[str, str, str, str]]:
     return out
 
 
+RELEARN = "2026-11-12"
+RELEARN_BACK = {"ethereum": 7200 * 45, "base": 43200 * 45}   # ~45 days of blocks
+
+
 def check(wallet: str, st: dict, chains: tuple[str, ...] = ("ethereum", "base")) -> list[tuple[str, str, str, str]]:
     pings = []
     for ch in chains:
         mine = st.setdefault("evm", {}).setdefault(ch, {"venues": {}})
+        if mine.get("relearn") != RELEARN:
+            # one-time full re-learn: listings sent while the old nonce bug was live (PARITY #7, 11 Nov 21:58 UTC, 7 min before
+            # f8bcca0 deployed) were never learned, and a fix alone never revisits them because the nonce no longer moves
+            mine.update(relearn=RELEARN, nonce=None, learned=max(0, mine.get("learned", 0) - RELEARN_BACK[ch]), learn_after=0)
+            log(f"bids {ch}: full re-learn of listings ({RELEARN})")
         if time.time() >= mine.get("learn_after", 0):
             try:
                 learn(ch, wallet, mine)
             except (RuntimeError, httpx.HTTPError, ValueError) as e:
                 log(f"bids learn {ch}: {e}")    # known venues are still watched; explorer lockouts last ~40 min
                 mine["learn_after"] = time.time() + 45 * 60
+        log(f"bids {ch}: {sum(len(v['keys']) for v in mine['venues'].values())} listings on {len(mine['venues'])} venues, block {mine.get('block')}")
         try:
             pings += watch(ch, wallet, mine)
         except (RuntimeError, httpx.HTTPError, ValueError) as e:
