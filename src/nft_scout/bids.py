@@ -309,7 +309,7 @@ def check(wallet: str, st: dict, chains: tuple[str, ...] = ("ethereum", "base"))
             except (RuntimeError, httpx.HTTPError, ValueError) as e:
                 log(f"bids learn {ch}: {e}")    # known venues are still watched; explorer lockouts last ~40 min
                 mine["learn_after"] = time.time() + 45 * 60
-        log(f"bids {ch}: {sum(len(v['keys']) for v in mine['venues'].values())} listings on {len(mine['venues'])} venues, block {mine.get('block')}")
+        log(f"bids {ch}: {sum(len(v['keys']) for v in mine['venues'].values())} listings on {len(mine['venues'])} venues, block {mine.get('block')}", public=True)
         try:
             pings += watch(ch, wallet, mine)
         except (RuntimeError, httpx.HTTPError, ValueError) as e:
